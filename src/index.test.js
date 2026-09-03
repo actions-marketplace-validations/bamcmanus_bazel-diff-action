@@ -516,6 +516,7 @@ describe("buildGetImpactedTargetArgs", () => {
 
 describe("run", () => {
   const inputDefaults = {
+    "head-ref": "HEAD",
     "bazel-path": "bazel",
     "workspace-path": ".",
     "bazel-diff-version": "latest",
@@ -544,6 +545,40 @@ describe("run", () => {
     mockReadFile.mockResolvedValue("//some:target");
   });
 
+  it("generates head hashes from a non-default head-ref", async () => {
+    mockGetInput.mockImplementation(
+      (key) =>
+        ({
+          ...inputDefaults,
+          "head-ref": "requested-head",
+        })[key] ?? "",
+    );
+
+    await run();
+
+    expect(mockSetFailed).not.toHaveBeenCalled();
+
+    const relevantCalls = mockExec.mock.calls
+      .filter(
+        ([cmd, args]) =>
+          (cmd === "git" && args[0] === "checkout") ||
+          (cmd === "java" && args.includes("generate-hashes")),
+      )
+      .map(([cmd, args]) => {
+        if (cmd === "git") return `checkout:${args[1]}`;
+        if (args.at(-1).endsWith("head_hashes.json")) return "generate:head";
+        return "generate:base";
+      });
+
+    expect(relevantCalls).toEqual([
+      "checkout:requested-head",
+      "generate:head",
+      "checkout:base-sha",
+      "generate:base",
+      "checkout:headsha123",
+    ]);
+  });
+
   it("resolves workspace-path '.' to an absolute path before passing to the JAR", async () => {
     await run();
 
@@ -558,7 +593,7 @@ describe("run", () => {
     }
   });
 
-  it("handles include-distance output as JSON", async () => {
+  it("uses head dependency edges for distance output", async () => {
     mockGetInput.mockImplementation(
       (key) =>
         ({
@@ -575,6 +610,23 @@ describe("run", () => {
     await run();
 
     expect(mockSetFailed).not.toHaveBeenCalled();
+    const generateHashesArgs = mockExec.mock.calls
+      .filter(
+        ([cmd, args]) => cmd === "java" && args.includes("generate-hashes"),
+      )
+      .map(([, args]) => args);
+    expect(generateHashesArgs).toHaveLength(2);
+    const [headArgs, baseArgs] = generateHashesArgs;
+    const depEdgesIndex = headArgs.indexOf("--depEdgesFile");
+    expect(depEdgesIndex).toBeGreaterThan(-1);
+    const depEdgesPath = headArgs[depEdgesIndex + 1];
+    expect(baseArgs).not.toContain("--depEdgesFile");
+    const impactedArgs = mockExec.mock.calls.find(
+      ([cmd, args]) => cmd === "java" && args.includes("get-impacted-targets"),
+    )[1];
+    expect(impactedArgs).toEqual(
+      expect.arrayContaining(["--depEdgesFile", depEdgesPath]),
+    );
     expect(mockSetOutput).toHaveBeenCalledWith("has-changes", "true");
     expect(mockSetOutput).toHaveBeenCalledWith("target-count", "1");
   });
